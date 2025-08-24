@@ -1,0 +1,17 @@
+[gd_scene load_steps=2 format=3 uid="uid://b0p0nsjnqy0j"]
+
+[ext_resource type="Script" uid="uid://y68oxmr7dnd6" path="res://src/scripts/Main.cs" id="1_n1w8x"]
+
+[node name="Main" type="Node" node_paths=PackedStringArray("canvas", "join")]
+script = ExtResource("1_n1w8x")
+canvas = NodePath("CanvasLayer")
+join = NodePath("CanvasLayer/Join")
+
+[node name="CanvasLayer" type="CanvasLayer" parent="." groups=["NetworkIgnoreGroup"]]
+
+[node name="Join" type="Button" parent="CanvasLayer"]
+texture_filter = 2
+offset_top = 1.0
+offset_right = 38.0
+offset_bottom = 32.0
+text = "Join"
