@@ -56,6 +56,10 @@ public partial class Network : Node
     protected static readonly string _CollisionMask = "CM";
     protected static readonly string _SerializeData = "SD";
     protected static readonly string _Data = "Data";
+
+    protected static readonly string _Radius = "Rad";
+    protected static readonly string _Shape = "SHP";
+    protected static readonly string _Height = "HGHT";
     #endregion
     public event Action<long> PeerConnected;
     public event Action<long> PeerDisconnected;
@@ -66,13 +70,27 @@ public partial class Network : Node
         NetworkState = (NetworkStateEnum)state;
     }
     public int UserId => Multiplayer.GetUniqueId();
+    public Player LocalPlayer { get; set; }
+    public List<Player> AllPlayers { get; set; } = new List<Player>();
 
+    TimeTracker networkUpdateTimer = new TimeTracker();
+    public event Action NetworkUpdate;
     public override void _Ready()
     {
         base._Ready();
-        
+
+
+        networkUpdateTimer.Loop = true;
+        networkUpdateTimer.WaitTime = (1f / 20f); // 20 times per second
+        networkUpdateTimer.TimeOut += OnNetworkUpdate;
+        networkUpdateTimer.Start();
         Multiplayer.PeerConnected += OnPeerConnect;
         Multiplayer.PeerDisconnected += OnPeerDisconnect;
+    }
+
+    private void OnNetworkUpdate(TimeTracker tracker)
+    {
+        NetworkUpdate?.Invoke();
     }
 
     private void OnPeerConnect(long id)
@@ -143,6 +161,7 @@ public partial class Network : Node
         data[_Parent].Set(newParent.GetPath());
 
         node.Reparent(newParent);
+        node.SetMultiplayerAuthority();
         Rpc(MethodName.HandleReparentNode, data.ToString());
     }
 
@@ -269,9 +288,9 @@ public partial class Network : Node
     {
         JsonValue data = JsonValue.Parse(dataString);
         Node parent = GetNode(data[_Parent].AsString());
-
+        
         Node n = SetAllNodeData(null, parent, data, false);
-
+       
         parent.AddChild(n, true);
     }
 
@@ -282,6 +301,8 @@ public partial class Network : Node
         Node parent = GetNode(data[_Parent].AsString());
         Node node = GetNode(data[_Node].AsString());
         node.Reparent(parent);
+
+        node.SetMultiplayerAuthority();
     }
 
     [Rpc(MultiplayerApi.RpcMode.AnyPeer, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
@@ -349,19 +370,19 @@ public partial class Network : Node
         {
             if (col2.Shape is CircleShape2D cir)
             {
-                data["Shape"].Set("Cir");
-                data["Rad"].Set(cir.Radius);
+                data[_Shape].Set("Cir");
+                data[_Radius].Set(cir.Radius);
             }
             else if (col2.Shape is CapsuleShape2D cap)
             {
-                data["Shape"].Set("Cap");
-                data["Rad"].Set(cap.Radius);
-                data["Height"].Set(cap.Height);
+                data[_Shape].Set("Cap");
+                data[_Radius].Set(cap.Radius);
+                data[_Height].Set(cap.Height);
             }
             else if (col2.Shape is RectangleShape2D rect)
             {
-                data["Shape"].Set("Rec");
-                data["Size"].Set(rect.Size);
+                data[_Shape].Set("Rec");
+                data[_Size].Set(rect.Size);
             }
 
         }
@@ -369,21 +390,28 @@ public partial class Network : Node
         {
             if (col3.Shape is SphereShape3D sph)
             {
-                data["Shape"].Set("Sphere");
-                data["Rad"].Set(sph.Radius);
+                data[_Shape].Set("Sphere");
+                data[_Radius].Set(sph.Radius);
             }
             else if (col3.Shape is CapsuleShape3D cap)
             {
-                data["Shape"].Set("Cap");
-                data["Rad"].Set(cap.Radius);
-                data["Height"].Set(cap.Height);
+                data[_Shape].Set("Cap");
+                data[_Radius].Set(cap.Radius);
+                data[_Height].Set(cap.Height);
             }
             else if (col3.Shape is BoxShape3D rect)
             {
-                data["Shape"].Set("Box");
-                data["Size"].Set(rect.Size);
+                data[_Shape].Set("Box");
+                data[_Size].Set(rect.Size);
+            }
+            else if(col3.Shape is CylinderShape3D cil)
+            {
+                data[_Shape].Set("Cyl");
+                data[_Height].Set(cil.Height);
+                data[_Radius].Set(cil.Radius);
             }
         }
+
         foreach (string group in node.GetGroups())
             data[_Group].Append(group);
 
@@ -423,23 +451,23 @@ public partial class Network : Node
         }
         if (node is CollisionShape2D cs2)
         {
-            if (data["Shape"].AsString() == "Cir")
+            if (data[_Shape].AsString() == "Cir")
             {
                 CircleShape2D x = new CircleShape2D();
-                x.Radius = data["Rad"].AsFloat();
+                x.Radius = data[_Radius].AsFloat();
                 cs2.Shape = x;
             }
-            else if (data["Shape"].AsString() == "Cap")
+            else if (data[_Shape].AsString() == "Cap")
             {
                 CapsuleShape2D x = new CapsuleShape2D();
-                x.Radius = data["Rad"].AsFloat();
-                x.Height = data["Height"].AsFloat();
+                x.Radius = data[_Radius].AsFloat();
+                x.Height = data[_Height].AsFloat();
                 cs2.Shape = x;
             }
-            else if (data["Shape"].AsString() == "Rect")
+            else if (data[_Shape].AsString() == "Rect")
             {
                 RectangleShape2D x = new RectangleShape2D();
-                x.Size = data["Size"].AsVector2();
+                x.Size = data[_Size].AsVector2();
                 cs2.Shape = x;
             }
             else
@@ -450,24 +478,31 @@ public partial class Network : Node
         }
         if(node is CollisionShape3D cs3)
         {
-            if (data["Shape"].AsString() == "Sphere")
+            if (data[_Shape].AsString() == "Sphere")
             {
                 SphereShape3D x = new SphereShape3D();
-                x.Radius = data["Rad"].AsFloat();
+                x.Radius = data[_Radius].AsFloat();
                 cs3.Shape = x;
             }
-            else if (data["Shape"].AsString() == "Cap")
+            else if (data[_Shape].AsString() == "Cap")
             {
                 CapsuleShape3D x = new CapsuleShape3D();
-                x.Radius = data["Rad"].AsFloat();
-                x.Height = data["Height"].AsFloat();
+                x.Radius = data[_Radius].AsFloat();
+                x.Height = data[_Height].AsFloat();
                 cs3.Shape = x;
             }
-            else if (data["Shape"].AsString() == "Box")
+            else if (data[_Shape].AsString() == "Box")
             {
                 BoxShape3D x = new BoxShape3D();
-                x.Size = data["Size"].AsVector3();
+                x.Size = data[_Size].AsVector3();
                 cs3.Shape = x;
+            }
+            else if (data[_Shape].AsString() == "Cyl")
+            {
+                CylinderShape3D cyl = new CylinderShape3D();
+                cyl.Radius = data[_Radius].AsFloat();
+                cyl.Height = data[_Height].AsFloat();
+                cs3.Shape = cyl;
             }
             else
             {
@@ -487,5 +522,21 @@ public partial class Network : Node
             return name;
         else
             return name.Substring(index + 1, name.Length - (index + 1));
+    }
+}
+
+public static class NetworkExtensions
+{
+    /// <summary>
+    /// Should be used in place of SetMultiplayerAuthority(int id)
+    /// </summary>
+    public static void SetMultiplayerAuthority(this Node node)
+    {
+        var player = node.FindParentOfType<Player>();
+        if (!player.IsValid())
+        {
+            node.SetMultiplayerAuthority(1);
+        }
+        node.SetMultiplayerAuthority(int.Parse(player.Name));
     }
 }
