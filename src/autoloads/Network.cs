@@ -22,9 +22,13 @@ public partial class Network : Node
 
     protected static readonly StringName NetworkIgnoreGroup = new StringName("NetworkIgnoreGroup");
     protected static readonly StringName NetworkIgnoreChildrenGroup = new StringName("NetworkIgnoreChildrenGroup");
+
+    public static readonly StringName NetworkAuthorityMeta = new StringName("NetAuth");
+
     protected static readonly string _Parent = "Parent";
     protected static readonly string _Node = "Node";
     protected static readonly string _Nodes = "Nodes";
+    protected static readonly string _NetworkAuthority = "NetAuth";
 
     protected static readonly string _PackedScene = "PackedScene";
     protected static readonly string _PackedSceneChild = "PackedSceneChild";
@@ -71,7 +75,23 @@ public partial class Network : Node
     }
     public int UserId => Multiplayer.GetUniqueId();
     public Player LocalPlayer { get; set; }
-    public List<Player> AllPlayers { get; set; } = new List<Player>();
+    public List<Player> AllPlayers { get; private set; } = new List<Player>();
+    public event Action<Player> PlayerAdded;
+    public event Action<Player> PlayerRemoved;
+
+    public void AddPlayer(Player player)
+    {
+        if(AllPlayers.Contains(player))
+            return;
+        AllPlayers.Add(player);
+        PlayerAdded?.Invoke(player);
+    }
+    public void RemovePlayer(Player player)
+    {
+        if(!AllPlayers.Remove(player))
+            return;
+        PlayerRemoved?.Invoke(player);
+    }
 
     TimeTracker networkUpdateTimer = new TimeTracker();
     public event Action NetworkUpdate;
@@ -104,7 +124,7 @@ public partial class Network : Node
 
             foreach (var child in GetTree().CurrentScene.GetChildren())
             {
-                data[_Nodes].Append(CollectAllNodeData(GetTree().CurrentScene, GetTree().CurrentScene, child, true));
+                data[_Nodes].Append(CollectAllNodeData(GetTree().CurrentScene, GetTree().CurrentScene, child));
             }
 
             RpcId(id, MethodName.HandleAddEverything, data.ToString());
@@ -122,7 +142,9 @@ public partial class Network : Node
         }
         PeerDisconnected?.Invoke(id);
     }
-
+    /// <summary>
+    /// Will add Node 'node' to Node 'parent'. Does NOT handle reparenting if node already has a parent.
+    /// </summary>
     public void AddNode(Node node, Node parent)
     {
         parent.AddChild(node, true);
@@ -139,21 +161,29 @@ public partial class Network : Node
         else
         {
             // need to traverse the node being added and any potential node children it has and send all the data to peers
-            data = CollectAllNodeData(node.Owner, parent, node, false);
+            data = CollectAllNodeData(node.Owner, parent, node);
             data[_Parent].Set(parent.GetPath());
         }
 
         Rpc(MethodName.HandleAddNode, data.ToString());
     }
+    /// <summary>
+    /// Will remove Node 'node'. ONLY frees the node on peers, locally will only remove from scene tree.
+    /// Call Free locally if desire to free from memory fully.
+    /// </summary>
     public void RemoveNode(Node node)
     {
-        node.QueueFree();
-
         JsonValue data = new JsonValue();
         data[_Node].Set(node.GetPath());
 
+        node.GetParent().RemoveChild(node);
+
         Rpc(MethodName.HandleRemoveNode, data.ToString());
     }
+    /*
+    /// <summary>
+    /// Will reparent Node 'node' to Node 'newParent'. Node MUST already have a parent.
+    /// </summary>
     public void ReparentNode(Node node, Node newParent)
     {
         JsonValue data = new JsonValue();
@@ -161,11 +191,11 @@ public partial class Network : Node
         data[_Parent].Set(newParent.GetPath());
 
         node.Reparent(newParent);
-        node.SetMultiplayerAuthority();
+        node.SetNetworkAuthority();
         Rpc(MethodName.HandleReparentNode, data.ToString());
     }
-
-    protected JsonValue CollectAllNodeData(Node currentOwner, Node parent, Node nodeProcessing, bool addingEverything)
+    */
+    protected JsonValue CollectAllNodeData(Node currentOwner, Node parent, Node nodeProcessing)
     {
         if (nodeProcessing.IsInGroup(NetworkIgnoreGroup))
             return null;
@@ -182,19 +212,19 @@ public partial class Network : Node
             if (!nodeProcessing.IsInGroup(NetworkIgnoreChildrenGroup))
             {
                 foreach (var child in nodeProcessing.GetChildren())
-                    nodeData[_Children].Append(CollectAllNodeData(nodeProcessing, nodeProcessing, child, addingEverything));
+                    nodeData[_Children].Append(CollectAllNodeData(nodeProcessing, nodeProcessing, child));
             }
         }
         else if (nodeProcessing.Owner == currentOwner && currentOwner != null) // child node existing in packedScene
         {
             nodeData[_PackedSceneChild].Set(true);
             nodeData[_Name].Set(nodeProcessing.Name);
-            if (addingEverything)
-                nodeData[_Data].Set(GetPrimitiveDataFromNode(nodeProcessing));
+            
+            nodeData[_Data].Set(GetPrimitiveDataFromNode(nodeProcessing));
             if (!nodeProcessing.IsInGroup(NetworkIgnoreChildrenGroup))
             {
                 foreach (var child in nodeProcessing.GetChildren())
-                    nodeData[_Children].Append(CollectAllNodeData(currentOwner, nodeProcessing, child, addingEverything));
+                    nodeData[_Children].Append(CollectAllNodeData(currentOwner, nodeProcessing, child));
             }
         }
         else // unique node not from packed scene
@@ -205,7 +235,7 @@ public partial class Network : Node
             if (!nodeProcessing.IsInGroup(NetworkIgnoreChildrenGroup))
             {
                 foreach (var child in nodeProcessing.GetChildren())
-                    nodeData[_Children].Append(CollectAllNodeData(currentOwner, nodeProcessing, child, addingEverything));
+                    nodeData[_Children].Append(CollectAllNodeData(currentOwner, nodeProcessing, child));
             }
         }
 
@@ -215,7 +245,7 @@ public partial class Network : Node
     /// <param name="addingEverything">If true, we will need to send all primitive data, if false, can skip that for all children of
     /// a packed scene.</param>
     /// <returns>A valid node if should be added, null if not necessary to add</returns>
-    protected Node SetAllNodeData(Node currentOwner, Node parent, JsonValue data, bool addingEverything)
+    protected Node SetAllNodeData(Node currentOwner, Node parent, JsonValue data)
     {
         if (data[_PackedScene].AsBool() == true)
         {
@@ -226,7 +256,7 @@ public partial class Network : Node
 
             foreach (var childData in data[_Children].Array)
             {
-                Node child = SetAllNodeData(currentOwner, node, childData, addingEverything);
+                Node child = SetAllNodeData(currentOwner, node, childData);
                 if (child != null)
                     node.AddChild(child, true);
             }
@@ -241,13 +271,11 @@ public partial class Network : Node
             Node node = parent.GetNode(data[_Name].AsString());
             node.Name = data[_Name].AsString();
 
-            if (addingEverything) // only worth adding all this data if a new player is joining and needs to know EVERYTHING
-                // If its a node added mid game, the children won't have been modified yet on any peer
-                SetPrimitiveDataOnNode(data[_Data], node);
+            SetPrimitiveDataOnNode(data[_Data], node);
 
             foreach (var childData in data[_Children].Array)
             {
-                SetAllNodeData(currentOwner, node, childData, addingEverything);
+                SetAllNodeData(currentOwner, node, childData);
             }
             return null;
         }
@@ -259,7 +287,7 @@ public partial class Network : Node
 
             foreach (var childData in data[_Children].Array)
             {
-                Node child = SetAllNodeData(currentOwner, node, childData, addingEverything);
+                Node child = SetAllNodeData(currentOwner, node, childData);
                 if (child != null)
                     node.AddChild(child, true);
             }
@@ -277,7 +305,7 @@ public partial class Network : Node
         JsonValue data = JsonValue.Parse(dataString);
         foreach (var nodeData in data[_Nodes].Array)
         {
-            Node n = SetAllNodeData(GetTree().CurrentScene, GetTree().CurrentScene, nodeData, true);
+            Node n = SetAllNodeData(GetTree().CurrentScene, GetTree().CurrentScene, nodeData);
             if (n != null)
                 GetTree().CurrentScene.AddChild(n, true);
         }
@@ -288,12 +316,12 @@ public partial class Network : Node
     {
         JsonValue data = JsonValue.Parse(dataString);
         Node parent = GetNode(data[_Parent].AsString());
-        
-        Node n = SetAllNodeData(null, parent, data, false);
-       
+
+        Node n = SetAllNodeData(null, parent, data);
+
         parent.AddChild(n, true);
     }
-
+    /*
     [Rpc(MultiplayerApi.RpcMode.AnyPeer, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
     protected void HandleReparentNode(string dataString)
     {
@@ -302,21 +330,25 @@ public partial class Network : Node
         Node node = GetNode(data[_Node].AsString());
         node.Reparent(parent);
 
-        node.SetMultiplayerAuthority();
+        node.SetNetworkAuthority(1);
     }
-
+    */
     [Rpc(MultiplayerApi.RpcMode.AnyPeer, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
     protected void HandleRemoveNode(string dataString)
     {
         JsonValue data = JsonValue.Parse(dataString);
-        GetNode(data[_Node].AsString()).QueueFree();
+        Node n = GetNode(data[_Node].AsString());
+        n.Free();
     }
 
     protected JsonValue GetNodeType(Node node)
     {
         JsonValue data = new JsonValue();
-        data[_Type].Set(node.GetType().ToString());
+
+        data[_Type].Set(RemoveNamespace(node.GetType().ToString()));
         data[_DerivedType].Set(node.GetClass());
+        
+        
         return data;
     }
 
@@ -327,6 +359,9 @@ public partial class Network : Node
         ulong nodeID = node.GetInstanceId();
         if (!data[_Type].AsString().Equals(data[_DerivedType].AsString()))
         {
+            GD.Print(data[_Type].AsString() +" : " + data[_DerivedType].AsString());
+
+
             node.SetScript(ResourceManager.Instance.GetResourceByName<Script>(data[_Type].AsString() + ".cs"));
         }
 
@@ -349,7 +384,7 @@ public partial class Network : Node
 
             data[_VisibilityLayer].Set(n2.VisibilityLayer);
         }
-        if(node is Node3D n3)
+        if (node is Node3D n3)
         {
             data[_Visible].Set(n3.Visible);
             data[_Position].Set(n3.Position);
@@ -386,7 +421,7 @@ public partial class Network : Node
             }
 
         }
-        if(node is CollisionShape3D col3)
+        if (node is CollisionShape3D col3)
         {
             if (col3.Shape is SphereShape3D sph)
             {
@@ -404,13 +439,16 @@ public partial class Network : Node
                 data[_Shape].Set("Box");
                 data[_Size].Set(rect.Size);
             }
-            else if(col3.Shape is CylinderShape3D cil)
+            else if (col3.Shape is CylinderShape3D cil)
             {
                 data[_Shape].Set("Cyl");
                 data[_Height].Set(cil.Height);
                 data[_Radius].Set(cil.Radius);
             }
         }
+
+        if(node.HasMeta(NetworkAuthorityMeta))
+            data[_NetworkAuthority].Set(node.GetMeta(NetworkAuthorityMeta).AsInt32());
 
         foreach (string group in node.GetGroups())
             data[_Group].Append(group);
@@ -432,7 +470,7 @@ public partial class Network : Node
             n2.YSortEnabled = data[_YSortEnabled].AsBool();
             n2.VisibilityLayer = data[_VisibilityLayer].AsUInt();
         }
-        if(node is Node3D n3)
+        if (node is Node3D n3)
         {
             n3.Visible = data[_Visible].AsBool();
             n3.Position = data[_Position].AsVector3();
@@ -444,7 +482,7 @@ public partial class Network : Node
             c2.CollisionMask = data[_CollisionMask].AsUInt();
             c2.CollisionLayer = data[_CollisionLayer].AsUInt();
         }
-        if(node is CollisionObject3D c3)
+        if (node is CollisionObject3D c3)
         {
             c3.CollisionLayer = data[_CollisionLayer].AsUInt();
             c3.CollisionMask = data[_CollisionMask].AsUInt();
@@ -476,7 +514,7 @@ public partial class Network : Node
                 throw new Exception();
             }
         }
-        if(node is CollisionShape3D cs3)
+        if (node is CollisionShape3D cs3)
         {
             if (data[_Shape].AsString() == "Sphere")
             {
@@ -511,6 +549,12 @@ public partial class Network : Node
             }
         }
 
+        if (data[_NetworkAuthority].IsInt)
+        {
+            GD.Print(node.Name + " " +  data[_NetworkAuthority].AsString());
+            node.SetMeta(NetworkAuthorityMeta, data[_NetworkAuthority].AsInt());
+        }    
+
         foreach (JsonValue group in data[_Group].Array)
             node.AddToGroup(group.AsString());
     }
@@ -527,16 +571,40 @@ public partial class Network : Node
 
 public static class NetworkExtensions
 {
-    /// <summary>
-    /// Should be used in place of SetMultiplayerAuthority(int id)
-    /// </summary>
-    public static void SetMultiplayerAuthority(this Node node)
+    public static void SetNetworkAuthority(this Node node, int overrideAuth = -1)
     {
-        var player = node.FindParentOfType<Player>();
-        if (!player.IsValid())
+        if (overrideAuth != -1)
         {
-            node.SetMultiplayerAuthority(1);
+            node.SetMeta(Network.NetworkAuthorityMeta, overrideAuth);
+            node.SetMultiplayerAuthority(overrideAuth);
+            return;
         }
-        node.SetMultiplayerAuthority(int.Parse(player.Name));
+
+        if (node.HasMeta(Network.NetworkAuthorityMeta)) // must have already been transfered from creating peer
+        {
+            node.SetMultiplayerAuthority(node.GetMeta(Network.NetworkAuthorityMeta).AsInt32());
+            return;
+        }
+
+        Node temp = node;
+        while(temp != null)
+        {
+            if(temp is Player p)
+            {
+                int authority = int.Parse(p.Name);
+                node.SetMeta(Network.NetworkAuthorityMeta, authority);
+                node.SetMultiplayerAuthority(authority);
+                return;
+            }
+            else if (temp.HasMeta(Network.NetworkAuthorityMeta))
+            {
+                int authority = temp.GetMeta(Network.NetworkAuthorityMeta).AsInt32();
+                node.SetMeta(Network.NetworkAuthorityMeta, authority);
+                node.SetMultiplayerAuthority(authority);
+                return;
+            }
+            temp = temp.GetParent();
+        }
+
     }
 }
